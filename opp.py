@@ -325,7 +325,7 @@ st.markdown("""
 ot_text_files = st.file_uploader("개별 변환할 OT 파일 업로드 (여러 개 선택 가능)", type=["xlsx", "xls"], accept_multiple_files=True, key="ot_text_uploader")
 
 if ot_text_files:
-    if st.button("🪄 OT 개별 파일 텍스트 변환 실행"):
+    if st.button("🪄 OT 급여명세서 작업실행"):
         with st.spinner("파일들을 개별적으로 분석하고 변환하는 중입니다..."):
             try:
                 # 1. 파일이 한 개인 경우: 그냥 단일 엑셀 파일로 다운로드
@@ -353,7 +353,7 @@ if ot_text_files:
                     st.download_button(
                         label="📥 변환된 전체 파일 압축(ZIP) 다운로드",
                         data=zip_buffer,
-                        file_name="OT_텍스트변환_결과.zip",
+                        file_name="OT_급여명세서_결과.zip",
                         mime="application/zip"
                     )
             except Exception as e:
