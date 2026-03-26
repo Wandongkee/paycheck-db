@@ -228,3 +228,67 @@ if uploaded_db and (up_op1 or up_op2 or up_op):
                 )
             except Exception as e:
                 st.error(f"❌ 처리 중 예상치 못한 오류가 발생했습니다: {e}")
+
+# ==========================================
+# 🛠️ 3. 특정 수식(VLOOKUP)만 선택적 값 복사 기능
+# ==========================================
+def convert_only_vlookup_to_values(uploaded_file):
+    """
+    엑셀 파일에서 VLOOKUP 수식만 찾아 결과값으로 덮어쓰고,
+    나머지 수식(SUM, IF 등)은 그대로 유지합니다.
+    """
+    # 1. 수식을 확인하기 위해 원본 그대로 워크북 로드
+    wb_formula = openpyxl.load_workbook(uploaded_file, data_only=False)
+    
+    # 2. 결과값을 추출하기 위해 data_only=True 속성으로 워크북 한 번 더 로드
+    # (Streamlit 파일 버퍼의 읽기 위치를 처음으로 초기화)
+    uploaded_file.seek(0) 
+    wb_value = openpyxl.load_workbook(uploaded_file, data_only=True)
+    
+    # 모든 시트를 순회하며 VLOOKUP 찾기
+    for sheet_name in wb_formula.sheetnames:
+        ws_f = wb_formula[sheet_name]
+        ws_v = wb_value[sheet_name]
+        
+        for row in ws_f.iter_rows():
+            for cell_f in row:
+                # 셀에 값이 있고, 문자열이며, '='로 시작하면 수식으로 간주
+                if isinstance(cell_f.value, str) and cell_f.value.startswith('='):
+                    # 해당 수식 안에 'VLOOKUP'이 포함되어 있는지 확인 (대소문자 구분 없이)
+                    if 'VLOOKUP' in cell_f.value.upper():
+                        # 값 전용 워크북에서 동일한 좌표의 결과값을 가져와서 덮어쓰기
+                        cell_v = ws_v[cell_f.coordinate]
+                        cell_f.value = cell_v.value
+                        
+    output = io.BytesIO()
+    wb_formula.save(output)
+    output.seek(0)
+    return output
+
+st.divider()
+
+st.subheader("3. VLOOKUP 수식만 선택적 값 변환")
+st.markdown("""
+파일 내의 다른 수식(SUM, IF 등)은 그대로 살려두고, **VLOOKUP 수식이 있는 셀만 찾아 화면에 보이는 '결과값'으로 덮어씌웁니다.**
+* ⚠️ **주의사항**: 파이썬은 엑셀의 캐시를 읽어오므로, 업로드 전 엑셀 프로그램에서 파일을 **반드시 한 번 저장(Ctrl+S)**한 후 올려주세요.
+""")
+
+uploaded_formula_file = st.file_uploader("VLOOKUP을 제거할 엑셀 파일 (.xlsx) 업로드", type=["xlsx"], key="formula_uploader")
+
+if uploaded_formula_file:
+    if st.button("🪄 VLOOKUP만 값으로 변환하기"):
+        with st.spinner("파일을 스캔하여 VLOOKUP 수식을 처리하는 중입니다..."):
+            try:
+                value_only_file = convert_only_vlookup_to_values(uploaded_formula_file)
+                
+                st.success("✅ VLOOKUP 수식 변환 완료! 나머지 수식은 안전하게 유지되었습니다.")
+                
+                st.download_button(
+                    label="📥 VLOOKUP 처리 완료 파일 다운로드",
+                    data=value_only_file,
+                    file_name=f"VLOOKUP제거_{uploaded_formula_file.name}",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="formula_download"
+                )
+            except Exception as e:
+                st.error(f"❌ 처리 중 오류 발생: {e}")
