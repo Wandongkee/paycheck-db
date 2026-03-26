@@ -5,6 +5,7 @@ import openpyxl
 import io
 import datetime
 import re
+import zipfile
 
 # ==========================================
 # ⚙️ 스크립트 실행 경로 자동 설정 
@@ -229,73 +230,6 @@ if uploaded_db and (up_op1 or up_op2 or up_op):
             except Exception as e:
                 st.error(f"❌ 처리 중 예상치 못한 오류가 발생했습니다: {e}")
 
-# ==========================================
-# 🛠️ 추가 기능: OT 데이터 요약 리스트 생성 함수
-# ==========================================
-def generate_ot_summary_excel(op1_files, op2_files, op_files):
-    data = []
-    
-    def process_files(files, dept_name):
-        if not files: return
-        for f in files:
-            if f.name.lower().endswith('.xls'):
-                file_to_read = convert_xls_to_xlsx_buffer(f)
-            else:
-                file_to_read = f
-                
-            xls = pd.ExcelFile(file_to_read)
-            for sheet in xls.sheet_names:
-                try:
-                    df = pd.read_excel(file_to_read, sheet_name=sheet, header=None)
-                    if len(df.columns) < 20: continue
-                    df = df.iloc[7:]
-                    valid_rows = df[df[4].notna()]
-                    
-                    for _, row in valid_rows.iterrows():
-                        name = str(row[4]).strip()
-                        hire_date = clean_date_string(row[6]) # G열 입사일자 (동명이인 구분용)
-                        
-                        # 안전한 숫자 변환 함수 (소수점 떨어지면 정수로)
-                        def safe_val(val):
-                            try:
-                                v = float(val)
-                                return int(v) if v.is_integer() else v
-                            except:
-                                return 0
-                                
-                        val_j = safe_val(row[9])  # J열: 조출점심저녁
-                        val_l = safe_val(row[11]) # L열: 연장OT
-                        val_n = safe_val(row[13]) # N열: 야간OT
-                        val_p = safe_val(row[15]) # P열: 휴일근무
-                        val_r = safe_val(row[17]) # R열: 휴일OT
-                        
-                        # 0시간인 항목도 출력하도록 포맷팅 (제안하신 양식 반영)
-                        data.append({
-                            "부서": dept_name,
-                            "성명": name,
-                            "입사일자": hire_date,
-                            "연장OT": f"연장OT:{val_l}H",
-                            "야간OT": f"야간OT:{val_n}H",
-                            "휴일근무": f"휴일근무:{val_p}D",
-                            "휴일OT": f"휴일OT:{val_r}H",
-                            "조출점심저녁": f"조출점심저녁:{val_j}H"
-                        })
-                except Exception:
-                    continue
-                    
-    # 업로드 창별로 부서명을 다르게 매핑하여 처리
-    process_files(op1_files, "운영1본부")
-    process_files(op2_files, "운영2본부")
-    process_files(op_files, "운영팀")
-    
-    # 리스트를 데이터프레임으로 변환 후 엑셀로 저장
-    df_result = pd.DataFrame(data)
-    output = io.BytesIO()
-    df_result.to_excel(output, index=False, engine='openpyxl')
-    output.seek(0)
-    
-    return output, len(df_result)
-
 # ------------------------------------------
 # UI 적용 부분 (기존 2번 섹션 파일 업로드 코드 아래에 배치)
 # ------------------------------------------
@@ -315,9 +249,118 @@ if up_op1 or up_op2 or up_op:
                 )
             except Exception as e:
                 st.error(f"❌ 요약 리스트 생성 중 오류 발생: {e}")
+                
+# ==========================================
+# 🛠️ 3. 급여명세서 작업
+# ==========================================
+def process_individual_ot_file(uploaded_file):
+    """
+    개별 OT 파일을 읽어 Y~AC열에 수당 텍스트를 생성하고 0으로 빈값을 채웁니다.
+    """
+    # .xls 파일인 경우 메모리 상에서 .xlsx로 변환
+    if uploaded_file.name.lower().endswith('.xls'):
+        file_to_read = convert_xls_to_xlsx_buffer(uploaded_file)
+        new_filename = uploaded_file.name + "x" # 확장자 변경
+    else:
+        file_to_read = uploaded_file
+        new_filename = uploaded_file.name
+
+    wb = openpyxl.load_workbook(file_to_read)
+    
+    # 모든 시트를 순회
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        
+        # 데이터가 시작되는 8행부터 마지막 행까지 반복
+        for row in range(8, ws.max_row + 1):
+            name_val = ws.cell(row=row, column=5).value # E열(이름)
+            
+            # 이름이 없으면 데이터가 없는 행으로 간주하고 건너뜀
+            if not name_val:
+                continue
+                
+            # 안전한 숫자 변환 (결측치 nan이나 빈칸은 0으로 처리)
+            def get_safe_value(col_idx):
+                val = ws.cell(row=row, column=col_idx).value
+                try:
+                    if pd.isna(val) or val is None or str(val).strip() == "":
+                        return 0
+                    v = float(val)
+                    return int(v) if v.is_integer() else v
+                except:
+                    return 0
+
+            # 각 열에서 원본 값 추출
+            val_j = get_safe_value(10) # J열: 조출점심저녁
+            val_l = get_safe_value(12) # L열: 연장OT
+            val_n = get_safe_value(14) # N열: 야간OT
+            val_p = get_safe_value(16) # P열: 휴일근무
+            val_r = get_safe_value(18) # R열: 휴일OT
+
+            # Y~AC열 (25~29)에 텍스트 결합하여 입력
+            ws.cell(row=row, column=25).value = f"연장OT:{val_l}H"       # Y열
+            ws.cell(row=row, column=26).value = f"야간OT:{val_n}H"       # Z열
+            ws.cell(row=row, column=27).value = f"휴일근무:{val_p}D"       # AA열
+            ws.cell(row=row, column=28).value = f"휴일OT:{val_r}H"       # AB열
+            ws.cell(row=row, column=29).value = f"조출점심저녁:{val_j}H"   # AC열
+
+    output = io.BytesIO()
+    wb.save(output)
+    output.seek(0)
+    
+    return output, new_filename
 
 # ==========================================
-# 🛠️ 3. 특정 수식(VLOOKUP)만 선택적 값 복사 기능
+# 🖥️ 3. UI 처리 부분 (웹앱 화면 구성)
+# ==========================================
+st.divider()
+
+st.subheader("3. OT 파일 개별 텍스트 변환 (수당 결합)")
+st.markdown("""
+원본 OT 파일을 업로드하면 원본의 형태를 그대로 유지한 채, 각 행의 **Y열 ~ AC열**에 수당명과 시간(또는 일수)이 결합된 텍스트를 자동으로 입력합니다.
+* 빈칸이나 값이 없는 경우는 안전하게 **0**으로 처리됩니다.
+* 여러 파일을 한 번에 올리면, 변환된 파일들을 **ZIP 압축파일**로 묶어서 다운로드할 수 있습니다.
+""")
+
+ot_text_files = st.file_uploader("개별 변환할 OT 파일 업로드 (여러 개 선택 가능)", type=["xlsx", "xls"], accept_multiple_files=True, key="ot_text_uploader")
+
+if ot_text_files:
+    if st.button("🪄 OT 개별 파일 텍스트 변환 실행"):
+        with st.spinner("파일들을 개별적으로 분석하고 변환하는 중입니다..."):
+            try:
+                # 1. 파일이 한 개인 경우: 그냥 단일 엑셀 파일로 다운로드
+                if len(ot_text_files) == 1:
+                    processed_file, new_filename = process_individual_ot_file(ot_text_files[0])
+                    st.success(f"✅ '{new_filename}' 변환 완료!")
+                    st.download_button(
+                        label=f"📥 {new_filename} 다운로드",
+                        data=processed_file,
+                        file_name=f"텍스트추가_{new_filename}",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                    )
+                
+                # 2. 파일이 여러 개인 경우: ZIP 파일로 압축하여 다운로드
+                else:
+                    zip_buffer = io.BytesIO()
+                    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        for ot_file in ot_text_files:
+                            processed_file, new_filename = process_individual_ot_file(ot_file)
+                            # ZIP 파일 내부에 엑셀 파일 쓰기
+                            zip_file.writestr(f"텍스트추가_{new_filename}", processed_file.getvalue())
+                    
+                    zip_buffer.seek(0)
+                    st.success(f"✅ 총 {len(ot_text_files)}개의 파일 변환 및 압축 완료!")
+                    st.download_button(
+                        label="📥 변환된 전체 파일 압축(ZIP) 다운로드",
+                        data=zip_buffer,
+                        file_name="OT_텍스트변환_결과.zip",
+                        mime="application/zip"
+                    )
+            except Exception as e:
+                st.error(f"❌ 변환 중 오류 발생: {e}")
+
+# ==========================================
+# 🛠️ 4. 특정 수식(VLOOKUP)만 선택적 값 복사 기능
 # ==========================================
 def convert_only_vlookup_to_values(uploaded_file):
     """
