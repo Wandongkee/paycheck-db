@@ -397,7 +397,7 @@ def convert_only_vlookup_to_values(uploaded_file):
 
 st.divider()
 
-st.subheader("3. VLOOKUP 수식만 선택적 값 변환")
+st.subheader("4. VLOOKUP 수식만 선택적 값 변환")
 st.markdown("""
 파일 내의 다른 수식(SUM, IF 등)은 그대로 살려두고, **VLOOKUP 수식이 있는 셀만 찾아 화면에 보이는 '결과값'으로 덮어씌웁니다.**
 * ⚠️ **주의사항**: 파이썬은 엑셀의 캐시를 읽어오므로, 업로드 전 엑셀 프로그램에서 파일을 **반드시 한 번 저장(Ctrl+S)**한 후 올려주세요.
