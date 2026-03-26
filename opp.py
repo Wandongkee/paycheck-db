@@ -3,9 +3,11 @@ import streamlit as st
 import pandas as pd
 import openpyxl
 import io
+import datetime
+import re
 
 # ==========================================
-# ⚙️ 스크립트 실행 경로 자동 설정 (이전 수정사항 유지)
+# ⚙️ 스크립트 실행 경로 자동 설정 
 # ==========================================
 try:
     current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,11 +23,12 @@ st.set_page_config(page_title="급여DB 자동 통합 툴", page_icon="💰", la
 st.title("💰 급여DB 자동 통합 툴")
 st.markdown("""
 급여 마스터 파일과 각 팀별 OT 파일을 업로드하면 데이터를 자동으로 매칭하여 최종 엑셀 파일을 생성합니다.
-동명이인 방지를 위해 **각 본부/팀별로 분리해서 업로드** 해주세요.
+* 동명이인 방지를 위해 **각 본부/팀별로 분리해서 업로드** 해주세요.
+* 이름과 **입사일자**를 동시 비교하여 동명이인을 정확히 구분합니다.
 """)
 
 # ==========================================
-# 🛠️ 기능 함수 (유지)
+# 🛠️ 기능 함수
 # ==========================================
 def convert_xls_to_xlsx_buffer(uploaded_file):
     df = pd.read_excel(uploaded_file, engine='xlrd')
@@ -34,7 +37,22 @@ def convert_xls_to_xlsx_buffer(uploaded_file):
     buffer.seek(0)
     return buffer
 
+def clean_date_string(date_val):
+    """엑셀의 다양한 날짜 형식을 순수 숫자(YYYYMMDD) 문자열로 변환"""
+    if date_val is None or pd.isna(date_val):
+        return ""
+    
+    # 1. 이미 날짜 객체(datetime)로 읽힌 경우
+    if isinstance(date_val, (pd.Timestamp, datetime.datetime, datetime.date)):
+        return date_val.strftime("%Y%m%d")
+    
+    # 2. 문자열인 경우 (예: "2020-01-01", "2020/01/01")
+    date_str = str(date_val).split(" ")[0] # 시간 데이터가 붙어있을 경우 날짜만 분리
+    clean_str = re.sub(r'[^0-9]', '', date_str) # 숫자 이외의 문자(-, / 등) 모두 제거
+    return clean_str
+
 def load_ot_data_from_uploaded_file(uploaded_file):
+    """OT 파일에서 {(이름, 입사일자): 금액} 형태로 데이터를 가져옴"""
     combined_data = {}
     try:
         if uploaded_file.name.lower().endswith('.xls'):
@@ -55,12 +73,16 @@ def load_ot_data_from_uploaded_file(uploaded_file):
                 
                 for _, row in valid_rows.iterrows():
                     name = str(row[4]).strip()
-                    amount = row[19]
+                    hire_date_raw = row[6] # G열 (인덱스 6)
+                    amount = row[19]       # T열 (인덱스 19)
                     
                     try:
                         amount = float(amount)
-                        # 주의: 동일 파일(팀) 내 동명이인이 있으면 덮어씌워짐
-                        combined_data[name] = amount
+                        hire_date = clean_date_string(hire_date_raw)
+                        
+                        # 이름과 입사일자를 조합한 고유 키 생성
+                        unique_key = f"{name}_{hire_date}"
+                        combined_data[unique_key] = amount
                     except:
                         pass
             except Exception:
@@ -81,7 +103,7 @@ def move_column(ws, col_from, col_to):
     ws.delete_cols(del_target)
 
 # ==========================================
-# 🚀 메인 데이터 처리 로직 (수정됨)
+# 🚀 메인 데이터 처리 로직
 # ==========================================
 def process_salary_master(db_file, ot_files_op1, ot_files_op2, ot_files_op):
     if db_file.name.lower().endswith('.xls'):
@@ -121,7 +143,7 @@ def process_salary_master(db_file, ot_files_op1, ot_files_op2, ot_files_op):
             ])
             ws.cell(row=row, column=21).value = total
 
-    # [Step 5] 그룹별 OT 데이터 각각 로드 (3개의 딕셔너리로 분리)
+    # [Step 5] 그룹별 OT 데이터 각각 로드 
     db_op1, db_op2, db_op_gen = {}, {}, {}
     
     if ot_files_op1:
@@ -131,34 +153,34 @@ def process_salary_master(db_file, ot_files_op1, ot_files_op2, ot_files_op):
     if ot_files_op:
         for f in ot_files_op: db_op_gen.update(load_ot_data_from_uploaded_file(f))
 
-    # [Step 6] 데이터 매칭
+    # [Step 6] 데이터 매칭 (이름 + 입사일자)
     count_match = 0
     ws.insert_cols(48, 1) # AV열 생성
 
     for row in range(2, ws.max_row + 1):
-        # ⚠️ 중요: 메인 DB에서 소속 부서를 나타내는 열 번호를 지정해야 합니다.
-        # 아래는 B열(column=2)에 부서명이 있다고 가정한 예시입니다. 실제 엑셀에 맞게 수정하세요.
-        dept_val = str(ws.cell(row=row, column=2).value or "").strip() 
-        name = ws.cell(row=row, column=4).value   
-        k_val = ws.cell(row=row, column=11).value 
-        u_val = ws.cell(row=row, column=21).value 
+        dept_val = str(ws.cell(row=row, column=2).value or "").strip() # B열(부서)
+        name = ws.cell(row=row, column=4).value                        # D열(이름)
+        hire_date_raw = ws.cell(row=row, column=6).value               # F열(입사일자)
+        k_val = ws.cell(row=row, column=11).value                      # K열(직종)
+        u_val = ws.cell(row=row, column=21).value                      # U열(합산금액)
         
         if k_val == "양중(T/C)":
+            hire_date = clean_date_string(hire_date_raw)
+            search_key = f"{name}_{hire_date}"
             found_ot = None
             
             # 부서명에 따라 참조할 OT 딕셔너리 결정
             if "운영1" in dept_val:
-                found_ot = db_op1.get(name)
+                found_ot = db_op1.get(search_key)
             elif "운영2" in dept_val:
-                found_ot = db_op2.get(name)
-            elif "운영" in dept_val: # 운영1, 2가 아닌 일반 운영팀
-                found_ot = db_op_gen.get(name)
+                found_ot = db_op2.get(search_key)
+            elif "운영" in dept_val:
+                found_ot = db_op_gen.get(search_key)
             else:
-                # 부서명이 명확하지 않을 경우 최후의 수단으로 전체 검색
-                found_ot = db_op1.get(name) or db_op2.get(name) or db_op_gen.get(name)
+                found_ot = db_op1.get(search_key) or db_op2.get(search_key) or db_op_gen.get(search_key)
 
             if found_ot is not None:
-                ws.cell(row=row, column=22).value = found_ot # V열
+                ws.cell(row=row, column=22).value = found_ot # V열에 입력
                 count_match += 1
 
         if u_val not in [None, ""]:
@@ -173,7 +195,7 @@ def process_salary_master(db_file, ot_files_op1, ot_files_op2, ot_files_op):
     return output, count_match
 
 # ==========================================
-# 🖥️ UI 및 파일 업로드 처리 (3분할)
+# 🖥️ UI 및 파일 업로드 처리 
 # ==========================================
 st.subheader("1. 메인 급여 DB 업로드")
 uploaded_db = st.file_uploader("메인 급여DB 파일 (급여DB.xlsx 또는 .xls)", type=["xlsx", "xls"])
