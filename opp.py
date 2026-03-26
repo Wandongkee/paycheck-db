@@ -6,6 +6,7 @@ import io
 import datetime
 import re
 import zipfile
+from openpyxl.utils import get_column_letter
 
 # ==========================================
 # ⚙️ 스크립트 실행 경로 자동 설정 
@@ -255,7 +256,8 @@ if up_op1 or up_op2 or up_op:
 # ==========================================
 def process_individual_ot_file(uploaded_file):
     """
-    개별 OT 파일을 읽어 Y~AC열에 수당 텍스트를 생성하고 0으로 빈값을 채웁니다.
+    개별 OT 파일을 읽어 J~AZ열을 숨김 처리하고,
+    BA~BE열에 수당 텍스트를 생성하며 빈값은 0으로 채웁니다.
     """
     # .xls 파일인 경우 메모리 상에서 .xlsx로 변환
     if uploaded_file.name.lower().endswith('.xls'):
@@ -270,6 +272,11 @@ def process_individual_ot_file(uploaded_file):
     # 모든 시트를 순회
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
+        
+        # [추가된 기능] J열(10)부터 AZ열(52)까지 숨김 처리
+        for col_idx in range(10, 53):
+            col_letter = get_column_letter(col_idx)
+            ws.column_dimensions[col_letter].hidden = True
         
         # 데이터가 시작되는 8행부터 마지막 행까지 반복
         for row in range(8, ws.max_row + 1):
@@ -297,12 +304,12 @@ def process_individual_ot_file(uploaded_file):
             val_p = get_safe_value(16) # P열: 휴일근무
             val_r = get_safe_value(18) # R열: 휴일OT
 
-            # Y~AC열 (25~29)에 텍스트 결합하여 입력
-            ws.cell(row=row, column=25).value = f"연장OT:{val_l}H"       # Y열
-            ws.cell(row=row, column=26).value = f"야간OT:{val_n}H"       # Z열
-            ws.cell(row=row, column=27).value = f"휴일근무:{val_p}D"       # AA열
-            ws.cell(row=row, column=28).value = f"휴일OT:{val_r}H"       # AB열
-            ws.cell(row=row, column=29).value = f"조출점심저녁:{val_j}H"   # AC열
+            # [수정된 기능] BA~BE열 (53~57)에 텍스트 결합하여 입력
+            ws.cell(row=row, column=53).value = f"연장OT:{val_l}H"       # BA열
+            ws.cell(row=row, column=54).value = f"야간OT:{val_n}H"       # BB열
+            ws.cell(row=row, column=55).value = f"휴일근무:{val_p}D"       # BC열
+            ws.cell(row=row, column=56).value = f"휴일OT:{val_r}H"       # BD열
+            ws.cell(row=row, column=57).value = f"조출점심저녁:{val_j}H"   # BE열
 
     output = io.BytesIO()
     wb.save(output)
