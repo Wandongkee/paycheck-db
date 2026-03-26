@@ -256,37 +256,39 @@ if up_op1 or up_op2 or up_op:
 # ==========================================
 def process_individual_ot_file(uploaded_file):
     """
-    개별 OT 파일을 읽어 J~AZ열을 숨김 처리하고,
-    BA~BE열에 수당 텍스트를 생성하며 빈값은 0으로 채웁니다.
+    개별 OT 파일을 읽어 J~AZ열을 그룹화하여 접어두고(+/- 버튼),
+    BA~BE열에 수당 텍스트를 생성하며 너비를 조절합니다.
     """
-    # .xls 파일인 경우 메모리 상에서 .xlsx로 변환
     if uploaded_file.name.lower().endswith('.xls'):
         file_to_read = convert_xls_to_xlsx_buffer(uploaded_file)
-        new_filename = uploaded_file.name + "x" # 확장자 변경
+        new_filename = uploaded_file.name + "x" 
     else:
         file_to_read = uploaded_file
         new_filename = uploaded_file.name
 
     wb = openpyxl.load_workbook(file_to_read)
     
-    # 모든 시트를 순회
     for sheet_name in wb.sheetnames:
         ws = wb[sheet_name]
         
-        # [추가된 기능] J열(10)부터 AZ열(52)까지 숨김 처리
+        # [개선된 기능 1] J열(10) ~ AZ열(52)을 그룹화(outline)하고 접어두기
         for col_idx in range(10, 53):
             col_letter = get_column_letter(col_idx)
+            ws.column_dimensions[col_letter].outlineLevel = 1
             ws.column_dimensions[col_letter].hidden = True
+            
+        # [개선된 기능 2] 텍스트가 입력될 BA열(53) ~ BE열(57)의 너비를 15로 넓히기
+        for col_idx in range(53, 58):
+            col_letter = get_column_letter(col_idx)
+            ws.column_dimensions[col_letter].width = 15
         
         # 데이터가 시작되는 8행부터 마지막 행까지 반복
         for row in range(8, ws.max_row + 1):
             name_val = ws.cell(row=row, column=5).value # E열(이름)
             
-            # 이름이 없으면 데이터가 없는 행으로 간주하고 건너뜀
             if not name_val:
                 continue
                 
-            # 안전한 숫자 변환 (결측치 nan이나 빈칸은 0으로 처리)
             def get_safe_value(col_idx):
                 val = ws.cell(row=row, column=col_idx).value
                 try:
@@ -297,14 +299,13 @@ def process_individual_ot_file(uploaded_file):
                 except:
                     return 0
 
-            # 각 열에서 원본 값 추출
-            val_j = get_safe_value(10) # J열: 조출점심저녁
-            val_l = get_safe_value(12) # L열: 연장OT
-            val_n = get_safe_value(14) # N열: 야간OT
-            val_p = get_safe_value(16) # P열: 휴일근무
-            val_r = get_safe_value(18) # R열: 휴일OT
+            val_j = get_safe_value(10) # J열
+            val_l = get_safe_value(12) # L열
+            val_n = get_safe_value(14) # N열
+            val_p = get_safe_value(16) # P열
+            val_r = get_safe_value(18) # R열
 
-            # [수정된 기능] BA~BE열 (53~57)에 텍스트 결합하여 입력
+            # BA~BE열 (53~57)에 텍스트 결합하여 입력
             ws.cell(row=row, column=53).value = f"연장OT:{val_l}H"       # BA열
             ws.cell(row=row, column=54).value = f"야간OT:{val_n}H"       # BB열
             ws.cell(row=row, column=55).value = f"휴일근무:{val_p}D"       # BC열
