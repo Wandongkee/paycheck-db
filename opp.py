@@ -230,6 +230,93 @@ if uploaded_db and (up_op1 or up_op2 or up_op):
                 st.error(f"❌ 처리 중 예상치 못한 오류가 발생했습니다: {e}")
 
 # ==========================================
+# 🛠️ 추가 기능: OT 데이터 요약 리스트 생성 함수
+# ==========================================
+def generate_ot_summary_excel(op1_files, op2_files, op_files):
+    data = []
+    
+    def process_files(files, dept_name):
+        if not files: return
+        for f in files:
+            if f.name.lower().endswith('.xls'):
+                file_to_read = convert_xls_to_xlsx_buffer(f)
+            else:
+                file_to_read = f
+                
+            xls = pd.ExcelFile(file_to_read)
+            for sheet in xls.sheet_names:
+                try:
+                    df = pd.read_excel(file_to_read, sheet_name=sheet, header=None)
+                    if len(df.columns) < 20: continue
+                    df = df.iloc[7:]
+                    valid_rows = df[df[4].notna()]
+                    
+                    for _, row in valid_rows.iterrows():
+                        name = str(row[4]).strip()
+                        hire_date = clean_date_string(row[6]) # G열 입사일자 (동명이인 구분용)
+                        
+                        # 안전한 숫자 변환 함수 (소수점 떨어지면 정수로)
+                        def safe_val(val):
+                            try:
+                                v = float(val)
+                                return int(v) if v.is_integer() else v
+                            except:
+                                return 0
+                                
+                        val_j = safe_val(row[9])  # J열: 조출점심저녁
+                        val_l = safe_val(row[11]) # L열: 연장OT
+                        val_n = safe_val(row[13]) # N열: 야간OT
+                        val_p = safe_val(row[15]) # P열: 휴일근무
+                        val_r = safe_val(row[17]) # R열: 휴일OT
+                        
+                        # 0시간인 항목도 출력하도록 포맷팅 (제안하신 양식 반영)
+                        data.append({
+                            "부서": dept_name,
+                            "성명": name,
+                            "입사일자": hire_date,
+                            "연장OT": f"연장OT:{val_l}H",
+                            "야간OT": f"야간OT:{val_n}H",
+                            "휴일근무": f"휴일근무:{val_p}D",
+                            "휴일OT": f"휴일OT:{val_r}H",
+                            "조출점심저녁": f"조출점심저녁:{val_j}H"
+                        })
+                except Exception:
+                    continue
+                    
+    # 업로드 창별로 부서명을 다르게 매핑하여 처리
+    process_files(op1_files, "운영1본부")
+    process_files(op2_files, "운영2본부")
+    process_files(op_files, "운영팀")
+    
+    # 리스트를 데이터프레임으로 변환 후 엑셀로 저장
+    df_result = pd.DataFrame(data)
+    output = io.BytesIO()
+    df_result.to_excel(output, index=False, engine='openpyxl')
+    output.seek(0)
+    
+    return output, len(df_result)
+
+# ------------------------------------------
+# UI 적용 부분 (기존 2번 섹션 파일 업로드 코드 아래에 배치)
+# ------------------------------------------
+if up_op1 or up_op2 or up_op:
+    st.info("💡 팁: 마스터 DB에 통합하기 전에, 업로드한 OT 파일들의 내역만 요약해서 엑셀로 뽑아볼 수 있습니다.")
+    if st.button("📋 팀별 OT 요약 리스트 추출하기"):
+        with st.spinner("OT 데이터를 요약하고 있습니다..."):
+            try:
+                summary_file, total_count = generate_ot_summary_excel(up_op1, up_op2, up_op)
+                st.success(f"✅ 총 {total_count}명의 OT 요약 리스트가 생성되었습니다.")
+                st.download_button(
+                    label="📥 OT 요약 리스트 엑셀 다운로드",
+                    data=summary_file,
+                    file_name="팀별_OT요약_리스트.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_summary"
+                )
+            except Exception as e:
+                st.error(f"❌ 요약 리스트 생성 중 오류 발생: {e}")
+
+# ==========================================
 # 🛠️ 3. 특정 수식(VLOOKUP)만 선택적 값 복사 기능
 # ==========================================
 def convert_only_vlookup_to_values(uploaded_file):
