@@ -106,6 +106,70 @@ def move_column(ws, col_from, col_to):
     ws.delete_cols(del_target)
 
 # ==========================================
+# 🛠️ 추가 기능: OT 데이터 요약 리스트 생성 함수
+# ==========================================
+def generate_ot_summary_excel(op1_files, op2_files, op_files):
+    data = []
+    
+    def process_files(files, dept_name):
+        if not files: return
+        for f in files:
+            if f.name.lower().endswith('.xls'):
+                file_to_read = convert_xls_to_xlsx_buffer(f)
+            else:
+                file_to_read = f
+                
+            xls = pd.ExcelFile(file_to_read)
+            for sheet in xls.sheet_names:
+                try:
+                    df = pd.read_excel(file_to_read, sheet_name=sheet, header=None)
+                    if len(df.columns) < 20: continue
+                    df = df.iloc[7:]
+                    valid_rows = df[df[4].notna()]
+                    
+                    for _, row in valid_rows.iterrows():
+                        name = str(row[4]).strip()
+                        hire_date = clean_date_string(row[6]) # G열 입사일자
+                        
+                        def safe_val(val):
+                            try:
+                                if pd.isna(val) or val is None or str(val).strip() == "": return 0
+                                v = float(val)
+                                return int(v) if v.is_integer() else v
+                            except:
+                                return 0
+                                
+                        val_j = safe_val(row[9])  # J열: 조출점심저녁
+                        val_l = safe_val(row[11]) # L열: 연장OT
+                        val_n = safe_val(row[13]) # N열: 야간OT
+                        val_p = safe_val(row[15]) # P열: 휴일근무
+                        val_r = safe_val(row[17]) # R열: 휴일OT
+                        
+                        data.append({
+                            "부서": dept_name,
+                            "성명": name,
+                            "입사일자": hire_date,
+                            "연장OT": f"연장OT:{val_l}H",
+                            "야간OT": f"야간OT:{val_n}H",
+                            "휴일근무": f"휴일근무:{val_p}D",
+                            "휴일OT": f"휴일OT:{val_r}H",
+                            "조출점심저녁": f"조출점심저녁:{val_j}H"
+                        })
+                except Exception:
+                    continue
+                    
+    process_files(op1_files, "운영1본부")
+    process_files(op2_files, "운영2본부")
+    process_files(op_files, "운영팀")
+    
+    df_result = pd.DataFrame(data)
+    output = io.BytesIO()
+    df_result.to_excel(output, index=False, engine='openpyxl')
+    output.seek(0)
+    
+    return output, len(df_result)
+
+# ==========================================
 # 🚀 메인 데이터 처리 로직
 # ==========================================
 def process_salary_master(db_file, ot_files_op1, ot_files_op2, ot_files_op):
