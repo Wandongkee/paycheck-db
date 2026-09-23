@@ -4,7 +4,7 @@ import zipfile
 from pathlib import Path
 import streamlit as st
 from excel_engine import (SALARY_ROLES, detect_header, candidates, headers,
-                          integrate, read_book, to_xlsx, statement, vlookup_values)
+                          integrate, read_book, to_xlsx, legacy_statement, vlookup_values, NOTICE_ROLES, append_ot_notices)
 from mapping_ui import mapping_panel
 
 st.set_page_config(page_title='급여DB 자동 통합 툴', page_icon='💰', layout='centered')
@@ -60,6 +60,7 @@ if db:
         st.error(str(exc))
 
 st.subheader('2. 본부·팀별 OT 통합')
+st.write('통합에 사용할 급여 시트를 선택해주세요. 실행하면 해당 시트의 기존 데이터 오른쪽에 연장OT·야간OT·휴일근무·휴일OT·조출점심저녁 안내문 5개 열도 추가합니다.')
 sources, ot_ready, uploads_present = [], True, False
 for i, group in enumerate(('운영1', '운영2', '운영')):
     uploads = st.file_uploader(group + ' OT 파일', type=['xlsx', 'xls'],
@@ -67,7 +68,7 @@ for i, group in enumerate(('운영1', '운영2', '운영')):
     for j, upload in enumerate(uploads):
         uploads_present = True
         try:
-            entries, valid = selected_sources(upload, group, f'ot:{i}:{j}:', ('name', 'hire', 'amount'))
+            entries, valid = selected_sources(upload, group, f'ot:{i}:{j}:', ('name', 'hire', 'amount') + NOTICE_ROLES)
             sources.extend(entries)
             ot_ready = ot_ready and valid
         except Exception as exc:
@@ -80,9 +81,17 @@ if db_data is not None and db_config and sources and db_ready and ot_ready:
         [(hashlib.sha256(x[0]).hexdigest(), x[1:]) for x in sources])).encode()).hexdigest()
 if st.button('🚀 데이터 통합 실행하기', disabled=not(db_ready and ot_ready and uploads_present and sources)):
     st.session_state.pop('salary_result', None)
+    st.session_state.pop('ot_notice_result', None)
     try:
         with st.spinner('급여DB와 OT를 비교하는 중입니다...'):
+            ot_outputs = append_ot_notices(sources)
             result = integrate(db_data, *db_config, sources)
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zipped:
+                zipped.writestr('급여DB_최종완료.xlsx', result[0])
+                for index, (group, filename, data) in enumerate(ot_outputs, 1):
+                    zipped.writestr(f'안내문추가_{group}_{index}_{Path(filename).stem}.xlsx', data)
+            st.session_state['ot_notice_result'] = (request, archive.getvalue())
         st.session_state['salary_result'] = (request, result)
     except Exception as exc:
         st.error(str(exc))
@@ -93,34 +102,31 @@ if saved and saved[0] == request:
     st.dataframe([dict(zip(rows[0], row)) for row in rows[1:]], hide_index=True)
     st.download_button('📥 급여DB 통합 결과 다운로드', output, file_name='급여DB_최종완료.xlsx',
                        mime='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    notice_saved = st.session_state.get('ot_notice_result')
+    if notice_saved and notice_saved[0] == request:
+        st.download_button('📥 급여DB + 안내문 추가 OT 전체 다운로드', notice_saved[1],
+            file_name='급여DB_OT_통합결과.zip', mime='application/zip')
 
 st.divider()
 st.subheader('3. 급여명세서 작업')
-st.write('OT 항목을 제목으로 선택하면 기존 BA~BE열에 수당 문구를 추가합니다. 해당 위치에 기존 값이 있으면 덮어쓰지 않고 안내합니다.')
+st.write('원본 OT 파일의 각 시트에서 시간·일수를 읽어 BA~BE열에 급여명세서용 안내문을 입력합니다. J~AZ열은 기존처럼 접어둡니다.')
+st.caption('예: 연장OT:16H · 야간OT:8H · 휴일근무:4D · 휴일OT:9H · 조출점심저녁:0H')
 text_uploads = st.file_uploader('문구를 추가할 OT 파일', type=['xlsx', 'xls'], accept_multiple_files=True, key='text:uploads')
-text_entries, text_ready = [], bool(text_uploads)
-for i, upload in enumerate(text_uploads):
-    try:
-        entries, ready = selected_sources(upload, '', f'text:{i}:',
-            ('name', 'early', 'extension', 'night', 'holiday_days', 'holiday_hours'))
-        text_entries.append((upload.name, entries))
-        text_ready = text_ready and ready
-    except Exception as exc:
-        text_ready = False
-        st.error(str(exc))
-text_request = hashlib.sha256(repr([(name, [(hashlib.sha256(e[0]).hexdigest(), e[1:]) for e in entries]) for name, entries in text_entries]).encode()).hexdigest() if text_ready else None
-if st.button('🪄 OT 급여명세서 작업실행', disabled=not text_ready):
+text_request = hashlib.sha256(repr([(f.name, hashlib.sha256(f.getvalue()).hexdigest()) for f in text_uploads]).encode()).hexdigest() if text_uploads else None
+if st.button('🪄 OT 급여명세서 작업실행', disabled=not text_uploads):
     st.session_state.pop('text_result', None)
     try:
-        outputs = [(f'{i + 1}_텍스트추가_{Path(name).stem}.xlsx', statement(entries))
-                   for i, (name, entries) in enumerate(text_entries)]
+        outputs = []
+        for i, upload in enumerate(text_uploads):
+            data, _ = prepared(upload, f'text:{i}:converted')
+            outputs.append((f'텍스트추가_{Path(upload.name).stem}.xlsx', legacy_statement(data)))
         if len(outputs) == 1:
             filename, output = outputs[0]
         else:
             archive = io.BytesIO()
             with zipfile.ZipFile(archive, 'w', zipfile.ZIP_DEFLATED) as zipped:
-                for name, data in outputs:
-                    zipped.writestr(name, data)
+                for i, (name, data) in enumerate(outputs, 1):
+                    zipped.writestr(f'{i}_{name}', data)
             filename, output = 'OT_급여명세서_결과.zip', archive.getvalue()
         st.session_state['text_result'] = (text_request, filename, output)
     except Exception as exc:
