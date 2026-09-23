@@ -417,3 +417,139 @@ def build_fixed_output(wb, source, header, mapping, audit_rows):
     result.auto_filter.ref = result.dimensions
     wb.active = 0
     wb.calculation = openpyxl.workbook.properties.CalcProperties(fullCalcOnLoad=True, forceFullCalc=True)
+
+
+NOTICE_ROLES = ('extension', 'night', 'holiday_days', 'holiday_hours', 'early')
+NOTICE_LABELS = ('연장OT', '야간OT', '휴일근무', '휴일OT', '조출점심저녁')
+NOTICE_UNITS = ('H', 'H', 'D', 'H', 'H')
+
+
+def notice_texts(values):
+    result = []
+    for value, label, unit in zip(values, NOTICE_LABELS, NOTICE_UNITS):
+        text = format(value, 'f')
+        if '.' in text:
+            text = text.rstrip('0').rstrip('.')
+        result.append(f'{label}:{text}{unit}')
+    return result
+
+
+def legacy_statement(data):
+    """Section 3: original all-sheet BA:BE text operation, without mapping UI."""
+    wb, cached = read_book(data), read_book(data, True)
+    for ws in wb:
+        for col in range(10, 53):
+            dimension = ws.column_dimensions[openpyxl.utils.get_column_letter(col)]
+            dimension.outlineLevel = 1
+            dimension.hidden = True
+        for col in range(53, 58):
+            ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = 15
+        for row in range(8, ws.max_row + 1):
+            if not ws.cell(row, 5).value:
+                continue
+            numbers = []
+            for col in (12, 14, 16, 18, 10):
+                try:
+                    numbers.append(number(cached[ws.title].cell(row, col).value, 'OT 시간'))
+                except InputError:
+                    numbers.append(Decimal(0))
+            for col, text in enumerate(notice_texts(numbers), 53):
+                ws.cell(row, col, text)
+    output = io.BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
+
+def append_ot_notices(sources):
+    """Append texts to selected OT sheets, preserving every existing cell/cache."""
+    grouped = {}
+    for data, sheet, header, mapping, group, filename in sources:
+        grouped.setdefault((group, filename, data), []).append((sheet, header, mapping))
+    outputs = []
+    for (group, filename, data), sheets in grouped.items():
+        wb, cached = read_book(data), read_book(data, True)
+        updates = {}
+        for sheet, header, mapping in sheets:
+            ws, values = wb[sheet], cached[sheet]
+            validate_mapping(ws, mapping, ('name',) + NOTICE_ROLES)
+            start = ws.max_column + 1
+            texts = {header: [label + ' 안내' for label in NOTICE_LABELS]}
+            for row in range(header + 1, ws.max_row + 1):
+                name = values.cell(row, mapping['name']).value
+                if not name or normalize(name) in ('합계', '총계', '소계'):
+                    continue
+                numbers = [value_at(ws, values, row, mapping[role],
+                           f'{filename}/{sheet}/{row}행 {label}')
+                           for role, label in zip(NOTICE_ROLES, NOTICE_LABELS)]
+                texts[row] = notice_texts(numbers)
+            updates[sheet] = (start, texts)
+        outputs.append((group, filename, append_text_cells(data, updates)))
+    return outputs
+
+
+def append_text_cells(data, updates):
+    # Patch only the selected sheet XML. Re-saving an entire workbook would
+    # discard formula caches, and can change unrelated sheets or Excel features.
+    import posixpath
+    from xml.dom import minidom
+    main_ns = 'http://schemas.openxmlformats.org/spreadsheetml/2006/main'
+    rel_ns = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+    with zipfile.ZipFile(io.BytesIO(data)) as original:
+        book = minidom.parseString(original.read('xl/workbook.xml'))
+        rels = minidom.parseString(original.read('xl/_rels/workbook.xml.rels'))
+        targets = {r.getAttribute('Id'): r.getAttribute('Target')
+                   for r in rels.getElementsByTagName('Relationship')}
+        paths = {}
+        for sheet in book.getElementsByTagNameNS(main_ns, 'sheet'):
+            target = targets[sheet.getAttributeNS(rel_ns, 'id')]
+            paths[sheet.getAttribute('name')] = target.lstrip('/') if target.startswith('/') else posixpath.normpath('xl/' + target)
+        replacements = {}
+        for name, (start, texts) in updates.items():
+            path = paths[name]
+            doc = minidom.parseString(original.read(path))
+            root = doc.documentElement
+            prefix = root.prefix + ':' if root.prefix else ''
+            def element(tag, attributes=None):
+                node = doc.createElementNS(main_ns, prefix + tag)
+                for key, value in (attributes or {}).items():
+                    node.setAttribute(key, str(value))
+                return node
+            sheet_data = doc.getElementsByTagNameNS(main_ns, 'sheetData')[0]
+            rows = {int(n.getAttribute('r')): n for n in sheet_data.childNodes
+                    if n.nodeType == n.ELEMENT_NODE and n.localName == 'row'}
+            for number, values in sorted(texts.items()):
+                row = rows.get(number)
+                if row is None:
+                    row = element('row', {'r': number})
+                    next_row = next((rows[r] for r in sorted(rows) if r > number), None)
+                    sheet_data.insertBefore(row, next_row)
+                    rows[number] = row
+                if row.hasAttribute('spans'):
+                    row.removeAttribute('spans')
+                for col, value in enumerate(values, start):
+                    address = f'{openpyxl.utils.get_column_letter(col)}{number}'
+                    cell = element('c', {'r': address, 't': 'inlineStr'})
+                    inline, text = element('is'), element('t')
+                    text.appendChild(doc.createTextNode(value))
+                    inline.appendChild(text)
+                    cell.appendChild(inline)
+                    row.appendChild(cell)
+            dims = doc.getElementsByTagNameNS(main_ns, 'dimension')
+            if dims:
+                min_col, min_row, max_col, max_row = openpyxl.utils.range_boundaries(dims[0].getAttribute('ref'))
+                end_col = openpyxl.utils.get_column_letter(max(max_col, start + 4))
+                dims[0].setAttribute('ref', f'{openpyxl.utils.get_column_letter(min_col)}{min_row}:{end_col}{max(max_row, max(texts))}')
+            columns = doc.getElementsByTagNameNS(main_ns, 'cols')
+            if columns:
+                columns = columns[0]
+            else:
+                columns = element('cols')
+                root.insertBefore(columns, sheet_data)
+            columns.appendChild(element('col', {'min': start, 'max': start + 4, 'width': 23, 'customWidth': 1}))
+            replacements[path] = doc.toxml(encoding='utf-8')
+        output = io.BytesIO()
+        with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as result:
+            for info in original.infolist():
+                result.writestr(info, replacements.get(info.filename, original.read(info.filename)))
+        return output.getvalue()
