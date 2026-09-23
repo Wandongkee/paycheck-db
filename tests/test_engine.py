@@ -332,9 +332,10 @@ def test_appends_only_selected_sheet_preserves_original_cells_and_parts():
         for info in original.infolist():
             raw = original.read(info.filename)
             if info.filename == 'xl/worksheets/sheet1.xml':
-                raw = raw.replace(b'<f>200*2</f><v></v>', b'<f>200*2</f><v>400</v>')
+                raw = __import__('re').sub(rb'(<f>200\*2</f>)<v(?:\s*/>|></v>)', rb'\1<v>400</v>', raw)
             z.writestr(info, raw)
     data = patched.getvalue()
+    assert read_book(data, True)['급여']['J2'].value == 400
     mapping = dict(name=1, extension=2, night=3, holiday_days=4, holiday_hours=5, early=6)
     output = append_ot_notices([(data, '급여', 1, mapping, '운영2', 'same.xlsx')])[0][2]
     before, after = zipfile.ZipFile(io.BytesIO(data)), zipfile.ZipFile(io.BytesIO(output))
