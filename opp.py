@@ -24,7 +24,9 @@ def prepared(upload, key):
 def selected_sources(upload, group, key, roles):
     data, digest = prepared(upload, key + ':converted')
     wb = read_book(data, True)
-    defaults = [ws.title for ws in wb if candidates(headers(ws, detect_header(ws)), 'name')]
+    eligible = [ws.title for ws in wb if candidates(headers(ws, detect_header(ws)), 'name')]
+    defaults = [wb.active.title] if wb.active.title in eligible else eligible if len(eligible) == 1 else []
+    st.caption('파일에 저장된 활성 시트를 기본 선택합니다. 회사·정산월을 확인하고, 과거 자료나 복사본을 함께 선택하지 마세요.')
     sheets = st.multiselect(f'{upload.name} — 처리할 시트', wb.sheetnames,
                             default=defaults, key=key + digest + ':sheets')
     sources, ready = [], bool(sheets)

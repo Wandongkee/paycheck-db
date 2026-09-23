@@ -24,8 +24,9 @@ ALIASES = {
     'name': ('성명', '이름', '사원명', '직원명'),
     'hire': ('입사일', '입사일자', '입사년월일', '입사일(년월일)'),
     'dept': ('부서', '부서명', '본부', '본부명', '소속'),
-    'job': ('직종', '직종명'),
-    'amount': ('OT금액', 'OT수당', '시간외수당합계', '연장근로수당합계'),
+    'job': ('직종', '직종명', '직책'),
+    'base': ('지급총액',), 'subtract1': ('식대',), 'subtract2': ('연차수당',),
+    'amount': ('OT금액', 'OT수당', '시간외수당합계', '연장근로수당합계', '계'),
     'early': ('조출점심저녁', '조출점심저녁시간'),
     'extension': ('연장OT', '연장OT시간', '연장시간'),
     'night': ('야간OT', '야간OT시간', '야간시간'),
@@ -40,7 +41,7 @@ def normalize(value):
 
 def to_xlsx(data, filename, executable=None):
     """Use Calc's workbook converter, never a values-only DataFrame export."""
-    if zipfile.is_zipfile(io.BytesIO(data)):
+    if data.startswith(b'PK') and zipfile.is_zipfile(io.BytesIO(data)):
         with zipfile.ZipFile(io.BytesIO(data)) as archive:
             if 'xl/workbook.xml' not in archive.namelist():
                 raise InputError('Excel 통합문서가 아닙니다.')
@@ -88,20 +89,71 @@ def read_book(data, values=False):
     return openpyxl.load_workbook(io.BytesIO(data), data_only=values)
 
 
-def headers(ws, row):
-    return {c.column: str(c.value).strip() for c in ws[row] if c.value is not None and str(c.value).strip()}
+def headers(ws, row, end_row=None):
+    end_row = end_row or row
+    labels = {}
+    for col in range(1, ws.max_column + 1):
+        parts = []
+        for r in range(row, end_row + 1):
+            value = ws.cell(r, col).value
+            if value is None:
+                for merged in ws.merged_cells.ranges:
+                    if merged.min_row <= r <= merged.max_row and merged.min_col <= col <= merged.max_col:
+                        value = ws.cell(merged.min_row, merged.min_col).value
+                        break
+            # ERP 'values only' copies may lose merged-cell definitions.
+            # Borrow only recognized OT group labels, never an arbitrary neighboring header.
+            if value is None and col > 1:
+                left = ws.cell(r, col - 1).value
+                if normalize(left) in {normalize(v) for v in ('조출, 점심, 저녁O/T', '조출, 저녁O/T', '조출, 점심O/T', '기본연장O/T', '야간O/T', '휴일근무', '휴일O/T')}:
+                    value = left
+            if value is not None and str(value).strip() and str(value).strip() not in parts:
+                parts.append(str(value).strip())
+        if parts:
+            labels[col] = ' | '.join(parts)
+    return labels
 
 
 def candidates(labels, role):
     aliases = {normalize(x) for x in ALIASES.get(role, ())}
-    return [col for col, value in labels.items() if normalize(value) in aliases]
+    result = []
+    time_groups = {'early': ('조출점심저녁ot', '조출저녁ot', '조출점심ot'),
+                   'extension': ('기본연장ot',), 'night': ('야간ot',),
+                   'holiday_days': ('휴일근무',), 'holiday_hours': ('휴일ot',)}
+    for col, value in labels.items():
+        parts = [normalize(x).replace(',', '') for x in value.split(' | ')]
+        if len(parts) == 1 and parts[0] in aliases:
+            result.append(col)
+        elif len(parts) > 1:
+            if role == 'amount' and '계' in parts:
+                result.append(col)
+            elif role in time_groups:
+                if any(x in parts for x in time_groups[role]) and any(x in parts for x in ('시간', '일', '시')) and '금액' not in parts:
+                    result.append(col)
+            elif role not in ('amount',) and any(x in aliases for x in parts):
+                result.append(col)
+    return result
+
+
+def detect_header_end(ws, start):
+    labels = headers(ws, start)
+    names, hires = candidates(labels, 'name'), candidates(labels, 'hire')
+    if len(names) == 1 and len(hires) == 1:
+        for row in range(start + 1, min(ws.max_row, start + 15) + 1):
+            try:
+                person_key(ws.cell(row, names[0]).value, ws.cell(row, hires[0]).value, ws.parent.epoch)
+                return row - 1
+            except (InputError, ValueError, TypeError, OverflowError):
+                continue
+    return start
 
 
 def detect_header(ws):
     scores = []
     for row in range(1, min(ws.max_row, 40) + 1):
-        labels = headers(ws, row)
-        score = sum(bool(candidates(labels, role)) for role in ALIASES)
+        labels = {c.column: str(c.value).strip() for c in ws[row] if c.value is not None}
+        score = (100 * bool(candidates(labels, 'name')) + 50 * bool(candidates(labels, 'hire'))
+                 + sum(bool(candidates(labels, role)) for role in ALIASES))
         scores.append((score, -row))
     return -max(scores)[1] if scores else 1
 
@@ -193,6 +245,7 @@ def integrate(data, sheet, header, mapping, ot_sources):
     ws, values = wb[sheet], cached[sheet]
     validate_mapping(ws, mapping, SALARY_ROLES)
     ot = load_ot(ot_sources)
+    supplied_groups = {source[4] for source in ot_sources}
     out = wb.create_sheet('대조내역')
     out.append(['원본시트', '원본행', '부서', '이름', '입사일자', '직종',
                 '급여DB OT 합산', 'OT 파일 금액', '금액 일치', '차액', '확인사항'])
@@ -219,7 +272,7 @@ def integrate(data, sheet, header, mapping, ot_sources):
                 else:
                     found = ot.get((group,) + key)
                     if found is None:
-                        status = 'OT 미매칭'
+                        status = 'OT 파일 미제공' if group not in supplied_groups else 'OT 미매칭'
                     else:
                         equal = total == found
                         matched += 1
@@ -247,7 +300,7 @@ def integrate(data, sheet, header, mapping, ot_sources):
     for row in out.iter_rows(min_row=2, min_col=7, max_col=10):
         for cell in row:
             if cell.column != 9:
-                cell.number_format = '#,##0.##'
+                cell.number_format = '#,##0'
     rows = list(out.values)
     build_fixed_output(wb, ws, header, mapping, rows)
     output = io.BytesIO()
@@ -315,7 +368,7 @@ def build_fixed_output(wb, source, header, mapping, audit_rows):
     """Stable downstream coordinates; source workbook sheets remain intact."""
     result = wb.create_sheet('급여통합결과', 0)
     pinned = {'dept': 2, 'name': 4, 'hire': 6, 'job': 11,
-              'ot1': 17, 'ot2': 18, 'ot3': 19, 'ot4': 20,
+              'ot1': 20, 'ot2': 17, 'ot3': 18, 'ot4': 19,
               'subtract1': 24, 'subtract2': 45, 'base': 47}
     destination = {mapping[role]: col for role, col in pinned.items()}
     reserved = set(pinned.values()) | {21, 22, 23, 48}
@@ -359,7 +412,7 @@ def build_fixed_output(wb, source, header, mapping, audit_rows):
             result.cell(row, 48, f'=AU{row}-X{row}-U{row}-AS{row}')
         result.cell(row, status_col, audit[10])
         for col in (21, 22, 48):
-            result.cell(row, col).number_format = '#,##0.##'
+            result.cell(row, col).number_format = '#,##0'
     result.freeze_panes = 'H2'
     result.auto_filter.ref = result.dimensions
     wb.active = 0

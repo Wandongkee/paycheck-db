@@ -1,6 +1,6 @@
 import streamlit as st
 from openpyxl.utils import get_column_letter
-from excel_engine import candidates, detect_header, headers
+from excel_engine import candidates, detect_header, detect_header_end, headers
 
 LABELS = {
     'dept': '부서', 'name': '이름', 'hire': '입사일자', 'job': '직종',
@@ -15,7 +15,9 @@ LABELS = {
 def mapping_panel(ws, roles, key):
     header = int(st.number_input('열 제목이 있는 행', min_value=1, max_value=max(1, ws.max_row),
                                 value=detect_header(ws), key=key + ':header'))
-    labels = headers(ws, header)
+    end = int(st.number_input('제목 마지막 행 (다음 행부터 데이터)', min_value=header,
+        max_value=max(header, ws.max_row), value=detect_header_end(ws, header), key=key + ':end:' + str(header)))
+    labels = headers(ws, header, end)
     options = [None] + list(labels)
     mapping = {}
     for role in roles:
@@ -28,4 +30,4 @@ def mapping_panel(ws, roles, key):
     ready = len(selected) == len(roles) and len(selected) == len(set(selected))
     if not ready:
         st.info('필요한 항목을 모두 선택해주세요. 서로 다른 항목에는 서로 다른 열을 선택해야 합니다.')
-    return header, mapping, ready
+    return end, mapping, ready

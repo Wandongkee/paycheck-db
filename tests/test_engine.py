@@ -53,7 +53,7 @@ def test_reordered_columns_and_original_preserved(reverse):
     assert fixed['V2'].value == 1000
     assert fixed['W2'].value == '=IF(V2="","미매칭",U2=V2)'
     assert fixed['AV2'].value == '=AU2-X2-U2-AS2'
-    assert [fixed.cell(2, c).value for c in range(17, 21)] == [100, 200, 300, 400]
+    assert [fixed.cell(2, c).value for c in range(17, 21)] == [200, 300, 400, 100]
     assert fixed['AU2'].value == 5000
     assert rows[1][6:10] == (1000, 1000, True, 3400)
     before, after = read_book(data), read_book(result)
@@ -82,7 +82,7 @@ def test_zero_ot_and_wrong_group():
     assert count == 1 and rows[1][7] == 0 and rows[1][10] == '금액 불일치'
     sources[0] = sources[0][:4] + ('운영2', 'ot.xlsx')
     _, count, rows = integrate(data, '급여', 2, mapping, sources)
-    assert count == 0 and rows[1][10] == 'OT 미매칭'
+    assert count == 0 and rows[1][10] == 'OT 파일 미제공'
 
 
 def test_uncached_salary_formula_is_not_zero():
@@ -221,3 +221,49 @@ def test_ot_missing_amount_is_not_zero():
     sources[0] = (save(wb),) + sources[0][1:]
     with pytest.raises(InputError, match='금액 또는 수식'):
         integrate(data, '급여', 2, mapping, sources)
+
+
+def test_legacy_xls_embedded_theme_zip_is_not_xlsx():
+    archive = io.BytesIO()
+    with zipfile.ZipFile(archive, 'w') as zipped:
+        zipped.writestr('theme/theme/theme1.xml', '<theme/>')
+    data = bytes.fromhex('d0cf11e0a1b11ae1') + archive.getvalue()
+    assert zipfile.is_zipfile(io.BytesIO(data))
+    with patch('excel_engine.shutil.which', return_value=None):
+        with pytest.raises(InputError, match='변환기가 설치'):
+            to_xlsx(data, 'erp.xls')
+
+
+@pytest.mark.parametrize('merged', [False, True])
+def test_realistic_multirow_ot_headers(merged):
+    from excel_engine import detect_header_end
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws['A1'] = 'T/C 연장근로수당'
+    for col, text in [(5, '성명'), (7, '입사일자'), (10, '연장근로수당')]:
+        ws.cell(4, col, text)
+    for col, text in [(10, '조출, 점심O/T'), (12, '기본연장O/T'), (14, '야간O/T'),
+                      (16, '휴일근무'), (18, '휴일O/T'), (20, '계')]:
+        ws.cell(5, col, text)
+    for col in range(10, 20):
+        ws.cell(6, col, '시간' if col % 2 == 0 else '금액')
+    ws['T7'] = 'K=B+D+F+H+J'
+    if merged:
+        for ref in ['E4:E7', 'G4:G7', 'J4:T4', 'J5:K5', 'L5:M5', 'N5:O5', 'P5:Q5', 'R5:S5', 'T5:T6']:
+            ws.merge_cells(ref)
+    ws['E8'], ws['G8'], ws['T8'] = '테스트', dt.datetime(2020, 1, 2), 0
+    start = detect_header(ws)
+    end = detect_header_end(ws, start)
+    assert (start, end) == (4, 7)
+    labels = headers(ws, start, end)
+    for role, col in dict(name=5, hire=7, amount=20, early=10, extension=12,
+                          night=14, holiday_days=16, holiday_hours=18).items():
+        assert candidates(labels, role) == [col]
+
+
+def test_erp_actual_header_aliases():
+    labels = {1: '직책', 2: '지급총액', 3: '식대', 4: '연차수당'}
+    assert candidates(labels, 'job') == [1]
+    assert candidates(labels, 'base') == [2]
+    assert candidates(labels, 'subtract1') == [3]
+    assert candidates(labels, 'subtract2') == [4]
