@@ -1,4 +1,2 @@
-streamlit
-pandas
-openpyxl
-xlrd
+streamlit>=1.40,<2
+openpyxl>=3.1,<4
