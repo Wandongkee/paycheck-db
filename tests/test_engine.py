@@ -178,3 +178,46 @@ def test_app_initial_render():
     app = AppTest.from_file(str(__import__('pathlib').Path('opp.py').resolve())).run(timeout=20)
     assert not app.exception
     assert all(button.disabled for button in app.button)
+
+
+def test_app_upload_mapping_and_download():
+    from streamlit.testing.v1 import AppTest
+    from pathlib import Path
+    data, _, sources = fixture(reverse=True)
+    class Upload(io.BytesIO):
+        def __init__(self, data, name):
+            super().__init__(data)
+            self.name = name
+    db, ot = Upload(data, 'erp.xlsx'), Upload(sources[0][0], 'ot.xlsx')
+    def uploads(label, **kwargs):
+        if label.startswith('메인 급여DB'):
+            return db
+        if label == '운영1 OT 파일':
+            return [ot]
+        return [] if kwargs.get('accept_multiple_files') else None
+    with patch('streamlit.file_uploader', side_effect=uploads):
+        app = AppTest.from_file(str(Path('opp.py').resolve())).run(timeout=20)
+        assert not app.exception
+        required = {'차액 기준금액 (기존 결과 AU열)': 3,
+                    '차감금액 1 (기존 결과 X열)': 2,
+                    '차감금액 2 (기존 결과 AS열)': 1}
+        for select in app.selectbox:
+            if select.label in required:
+                select.set_value(required[select.label])
+        app.run()
+        assert not app.exception
+        run = next(button for button in app.button if '데이터 통합' in button.label)
+        assert not run.disabled
+        run.click().run()
+        assert not app.exception
+        output = app.session_state['salary_result'][1][0]
+        assert read_book(output).active['V2'].value == 1000
+
+
+def test_ot_missing_amount_is_not_zero():
+    data, mapping, sources = fixture()
+    wb = read_book(sources[0][0])
+    wb.active['A2'] = None
+    sources[0] = (save(wb),) + sources[0][1:]
+    with pytest.raises(InputError, match='금액 또는 수식'):
+        integrate(data, '급여', 2, mapping, sources)
